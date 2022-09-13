@@ -3,6 +3,28 @@ use std::time::{Duration, SystemTime};
 use evdev::{uinput::VirtualDeviceBuilder, AttributeSet, Key, RelativeAxisType, InputEvent, EventType, InputEventKind, EventStream};
 use tokio::time;
 
+// Acceleration Mode
+// https://en.wikipedia.org/wiki/Mouse_keys#MouseKeysAccel
+static MK_ACTION_DELTA: i32 = 7;
+static MK_DELAY: u64 = 32; 	//milliseconds between the initial key press and first repeated motion event
+static MK_INTERVAL: u64 = 16; // 	milliseconds between repeated motion events
+static MK_MAX_SPEED: i32 = 10; 	// steady speed (in action_delta units) applied each event
+static MK_TIME_TO_MAX: u64 = 40; 	// number of events (count) accelerating to steady speed
+static MK_CURVE: i32 = 100; //	ramp used to reach maximum pointer speed
+                            //
+
+// Kinetic mode
+// https://docs.qmk.fm/#/feature_mouse_keys?id=kinetic-mode
+static MOUSEKEY_DELAY: u64 = 5; //  	Delay between pressing a movement key and cursor movement
+static MOUSEKEY_INTERVAL: u64 =  8; // 	Time between cursor movements in milliseconds
+static MOUSEKEY_MOVE_DELTA: i32 = 16; //	Step size for accelerating from initial to base speed
+static MOUSEKEY_INITIAL_SPEED: i32 = 100; // 	Initial speed of the cursor in pixel per second
+static MOUSEKEY_BASE_SPEED: i32 =  	5000; // 	Maximum cursor speed at which acceleration stops
+static MOUSEKEY_DECELERATED_SPEED: i32 = 	400; //	Decelerated cursor speed
+static MOUSEKEY_ACCELERATED_SPEED: i32 =  	3000; // 	Accelerated cursor speed
+
+
+
 
 pub fn pick_device() -> evdev::Device {
     use std::io::prelude::*;
@@ -64,19 +86,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let path = path?;
         println!("Available as {}", path.display());
     }
+    let mut movement_start_time: SystemTime = SystemTime::UNIX_EPOCH;
+    let mut num_repeat: u64 = 0;
+    let mut action: u64 = 0;
 
     let mut right_pressed = false;
-    let mut right_press_time: SystemTime = SystemTime::UNIX_EPOCH;
     let mut left_pressed = false;
-    let mut left_press_time: SystemTime = SystemTime::UNIX_EPOCH;
     let mut up_pressed = false;
-    let mut up_press_time: SystemTime = SystemTime::UNIX_EPOCH;
     let mut down_pressed = false;
-    let mut down_press_time: SystemTime = SystemTime::UNIX_EPOCH;
 
     let mut left_button_down = false;
 
-    let mut interval = time::interval(Duration::from_millis(16));
+    let mut interval = time::interval(Duration::from_millis(MK_INTERVAL));
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let mut events = d.into_event_stream()?;
     loop {
@@ -128,39 +149,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             InputEventKind::Key(Key::KEY_F15)  => {
                 if ev.value() == 1 {
                     up_pressed = true;
-                    up_press_time = ev.timestamp();
+                    if movement_start_time == SystemTime::UNIX_EPOCH {
+                      movement_start_time = ev.timestamp();
+                    }
 
                 } else {
                     up_pressed = false;
+                    if !(up_pressed || down_pressed || left_pressed || right_pressed) {
+                        movement_start_time = SystemTime::UNIX_EPOCH;
+                        num_repeat = 0;
+                    }
                 }
             },
             InputEventKind::Key(Key::KEY_F16)  => {
                 if ev.value() == 1 {
                     right_pressed = true;
-                    right_press_time = ev.timestamp();
+                    if movement_start_time == SystemTime::UNIX_EPOCH {
+                      movement_start_time = ev.timestamp();
+                    }
 
                 } else {
                     right_pressed = false;
+                    if !(up_pressed || down_pressed || left_pressed || right_pressed) {
+                        movement_start_time = SystemTime::UNIX_EPOCH;
+                        num_repeat = 0;
+                    }
                 }
 
             },
             InputEventKind::Key(Key::KEY_F14)  => {
                 if ev.value() == 1 {
                     down_pressed = true;
-                    down_press_time = ev.timestamp();
+                    if movement_start_time == SystemTime::UNIX_EPOCH {
+                      movement_start_time = ev.timestamp();
+                    }
 
                 } else {
                     down_pressed = false;
+                    if !(up_pressed || down_pressed || left_pressed || right_pressed) {
+                        movement_start_time = SystemTime::UNIX_EPOCH;
+                        num_repeat = 0;
+                    }
                 }
 
             },
             InputEventKind::Key(Key::KEY_F13)  => {
                 if ev.value() == 1 {
                     left_pressed = true;
-                    left_press_time = ev.timestamp();
+                    if movement_start_time == SystemTime::UNIX_EPOCH {
+                        movement_start_time = ev.timestamp();
+                    }
 
                 } else {
                     left_pressed = false;
+                    if !(up_pressed || down_pressed || left_pressed || right_pressed) {
+                        movement_start_time = SystemTime::UNIX_EPOCH;
+                        num_repeat = 0;
+                    }
                 }
 
             },
@@ -169,29 +214,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         //println!("{:?}", ev);
         } else {
             let mut events: Vec<InputEvent> = vec![];
+            let repeat_delay = time::Duration::from_millis(MK_DELAY);
             
             // TODO: emit side moves
-            if right_pressed {
-              let d = curve(right_press_time);
-              let move_right = InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_X.0, d);
-              events.push(move_right);
+            if right_pressed && (num_repeat != 0 || movement_start_time.elapsed().unwrap() > repeat_delay) {
+                //let d = curve(movement_start_time);
+                let d = mouse_keys_accel(num_repeat);
+                let move_right = InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_X.0, d);
+                events.push(move_right);
             }
-            if left_pressed {
-              let d = curve(left_press_time);
-              let move_left = InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_X.0, -d);
-              events.push(move_left);
+            if left_pressed  && (num_repeat != 0 || movement_start_time.elapsed().unwrap() > repeat_delay) {
+                // let d = curve(movement_start_time);
+                let d = mouse_keys_accel(num_repeat);
+                let move_left = InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_X.0, -d);
+                events.push(move_left);
             }
-            if up_pressed {
-              let d = curve(up_press_time);
-              let move_up = InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_Y.0, -d);
-              events.push(move_up);
+            if up_pressed  && (num_repeat != 0 || movement_start_time.elapsed().unwrap() > repeat_delay) {
+                //let d = curve(movement_start_time);
+                let d = mouse_keys_accel(num_repeat);
+                let move_up = InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_Y.0, -d);
+                events.push(move_up);
             }
-            if down_pressed {
-              let d = curve(down_press_time);
+            if down_pressed  && (num_repeat != 0 || movement_start_time.elapsed().unwrap() > repeat_delay) {
+              //let d = curve(movement_start_time);
+              let d = mouse_keys_accel(num_repeat);
               let move_down = InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_Y.0, d);
               events.push(move_down);
             }
             if !events.is_empty() {
+                num_repeat += 1;
                 device.emit(&events).unwrap();
             }
             // timer tick
@@ -200,18 +251,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 
-// Mouse key Accel:
-// https://en.wikipedia.org/wiki/Mouse_keys#MouseKeysAccel
-// also: https://github.com/qmk/qmk_firmware/blob/master/docs/feature_mouse_keys.md
-// mk_delay 	milliseconds between the initial key press and first repeated motion event
-// mk_interval 	milliseconds between repeated motion events
-// mk_max_speed 	steady speed (in action_delta units) applied each event
-// mk_time_to_max 	number of events (count) accelerating to steady speed
-// mk_curve 	ramp used to reach maximum pointer speed
-
-
 async fn wait_for_input(events: &mut EventStream) -> Result<InputEvent, Box<dyn std::error::Error>>  {
     Ok(events.next_event().await?)
+}
+
+// return action accordingly
+fn mouse_keys_accel(i: u64) -> i32 {
+  if i == 0 {
+     MK_ACTION_DELTA
+  } else if i >= MK_TIME_TO_MAX {
+      MK_MAX_SPEED * MK_ACTION_DELTA 
+  } else {
+      let action = MK_ACTION_DELTA as f32 * 
+          MK_MAX_SPEED as f32 * ((i as f32 / MK_TIME_TO_MAX as f32).powf((1000.0 + MK_CURVE as f32) / 1000.0));
+      action.floor() as i32
+  }
 }
 // todo: maybe use acceleration formula
 fn curve(t: SystemTime) -> i32 {
