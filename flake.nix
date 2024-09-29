@@ -23,6 +23,7 @@
               })
               rustfmt
               clippy
+              mold
               rust-analyzer
               pkg-config
               cargo-generate
@@ -40,7 +41,7 @@
           };
       packages.transgression-tui = #pkgs.callPackage (with pkgs;
           with pkgs; rustPlatform.buildRustPackage rec {
-            pname = "transg-tui";
+            pname = "kmouse";
             version = "0.0.1";
 
             src = ./.;
@@ -53,9 +54,9 @@
               fetchSubmodules = true;
             };*/
 
-            cargoSha256 = "sha256-kMmHp+pjeTN5qD2cjrNr+14b3HJaD84Y8xydkaEJBak=";
+            cargoSha256 = "sha256-XKe0WZ6qaLdEdspEB+WZ9cGx7lAjd6adegVWKF559qI=";
 
-            nativeBuildInputs = [ pkg-config ];
+            nativeBuildInputs = [ pkg-config mold];
             buildInputs = [
               openssl
             ];
